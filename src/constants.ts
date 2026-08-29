@@ -1,0 +1,13 @@
+﻿export const CHECKPOINT_STEP = 0.05;      // チェックポイント間隔（正規化）
+export const DEFAULT_TOLERANCE = 0.065;   // 判定許容半径（正規化: より正確になぞるよう微調整）
+export const LOOKAHEAD = 2;               // 飛ばし許容数（2個先まで）
+export const COMPLETION_THRESHOLD = 0.85; // クリア閾値（85%: 途中で終わる感覚を防ぎ、最後までしっかりなぞらせる）
+export const ON_PATH_THRESHOLD = 0.55;    // ガイド上に居た割合の下限（塗りつぶし対策）
+export const ON_PATH_ALPHA = 0.02;        // on-path 率の指数移動平均の係数
+export const STROKE_WIDTH = 20;           // 線幅（CSS px）
+export const MIN_POINT_DISTANCE = 0.004;  // 軌跡点の間引き距離（正規化）
+export const MAX_CANVAS_SIZE = 900;       // キャンバス上限（CSS px）
+export const MIN_TAP_SIZE = 64;           // タップ対象の最小寸法（CSS px）
+export const STROKE_SOUND_THROTTLE_MS = 80;
+export const PARTICLE_LIMIT = 120;
+export const STORAGE_KEY = 'presketch.progress.v1';
