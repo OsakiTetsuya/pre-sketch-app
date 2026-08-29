@@ -260,6 +260,93 @@ export const STAGES: StageData[] = [
       },
     ],
   },
+
+  // --- Stage 5: もっとかたちを合体しよう（生きもの・乗りもの） ---
+  {
+    id: 'stage_5_1',
+    stageNumber: 5,
+    subStageNumber: 1,
+    title: '○＋○＋△',
+    motifName: 'ぺんぎん',
+    themeColor: '#0f172a',
+    fillColor: '#38bdf8',
+    completionEffect: 'fill',
+    guidePaths: [
+      { id: 'head', type: 'circle', closed: true, points: circlePoints({ x: 0.50, y: 0.32 }, 0.15) },
+      { id: 'body', type: 'circle', closed: true, points: circlePoints({ x: 0.50, y: 0.65 }, 0.22) },
+      {
+        id: 'beak',
+        type: 'polygon',
+        closed: true,
+        points: polygonPoints([
+          { x: 0.40, y: 0.30 },
+          { x: 0.20, y: 0.34 },
+          { x: 0.40, y: 0.38 },
+        ]),
+      },
+      {
+        id: 'wing',
+        type: 'polygon',
+        closed: true,
+        points: polygonPoints([
+          { x: 0.64, y: 0.52 },
+          { x: 0.82, y: 0.66 },
+          { x: 0.64, y: 0.72 },
+        ]),
+      },
+    ],
+  },
+  {
+    id: 'stage_5_2',
+    stageNumber: 5,
+    subStageNumber: 2,
+    title: '○＋○＋○＋○',
+    motifName: 'くまさん',
+    themeColor: '#78350f',
+    fillColor: '#fbbf24',
+    completionEffect: 'fill',
+    guidePaths: [
+      { id: 'face', type: 'circle', closed: true, points: circlePoints({ x: 0.50, y: 0.56 }, 0.25) },
+      { id: 'earL', type: 'circle', closed: true, points: circlePoints({ x: 0.32, y: 0.34 }, 0.10) },
+      { id: 'earR', type: 'circle', closed: true, points: circlePoints({ x: 0.68, y: 0.34 }, 0.10) },
+      { id: 'snout', type: 'circle', closed: true, points: circlePoints({ x: 0.50, y: 0.64 }, 0.09) },
+    ],
+  },
+  {
+    id: 'stage_5_3',
+    stageNumber: 5,
+    subStageNumber: 3,
+    title: '□＋△＋せん',
+    motifName: 'しんかんせん',
+    themeColor: '#0369a1',
+    fillColor: '#bae6fd',
+    completionEffect: 'fill',
+    guidePaths: [
+      {
+        id: 'body',
+        type: 'polygon',
+        closed: true,
+        points: polygonPoints([
+          { x: 0.14, y: 0.62 },
+          { x: 0.62, y: 0.62 },
+          { x: 0.86, y: 0.56 },
+          { x: 0.68, y: 0.38 },
+          { x: 0.14, y: 0.38 },
+        ]),
+      },
+      { id: 'line', type: 'line', closed: false, points: linePoints({ x: 0.14, y: 0.52 }, { x: 0.76, y: 0.52 }) },
+      {
+        id: 'cockpit',
+        type: 'polygon',
+        closed: true,
+        points: polygonPoints([
+          { x: 0.60, y: 0.42 },
+          { x: 0.72, y: 0.48 },
+          { x: 0.60, y: 0.48 },
+        ]),
+      },
+    ],
+  },
 ];
 
 export const STAGE_ORDER = STAGES.map((s) => s.id);

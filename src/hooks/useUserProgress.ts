@@ -11,7 +11,7 @@ export const useUserProgress = () => {
     saveProgress(progress);
   }, [progress]);
 
-  /** ステージ完了処理（次のステージの自動開放） */
+  /** ステージ完了処理 */
   const completeStage = useCallback((stageId: string, stars = 1) => {
     setProgress((prev) => {
       const now = new Date().toISOString();
@@ -20,19 +20,10 @@ export const useUserProgress = () => {
         [stageId]: { stars, completedAt: now },
       };
 
-      // 次のステージを開放
-      const currentIndex = STAGES.findIndex((s) => s.id === stageId);
-      const nextStage = currentIndex >= 0 && currentIndex < STAGES.length - 1 ? STAGES[currentIndex + 1] : null;
-
-      const nextUnlocked = [...prev.unlockedStages];
-      if (nextStage && !nextUnlocked.includes(nextStage.id)) {
-        nextUnlocked.push(nextStage.id);
-      }
-
       return {
         ...prev,
         completedStages: nextCompleted,
-        unlockedStages: nextUnlocked,
+        unlockedStages: STAGES.map((s) => s.id),
       };
     });
   }, []);
@@ -45,7 +36,7 @@ export const useUserProgress = () => {
     }));
   }, []);
 
-  /** 全ステージ開放（保護者メニュー） */
+  /** 全ステージ開放 */
   const unlockAllStages = useCallback(() => {
     setProgress((prev) => ({
       ...prev,
@@ -53,7 +44,7 @@ export const useUserProgress = () => {
     }));
   }, []);
 
-  /** 進捗リセット（保護者メニュー） */
+  /** 進捗リセット */
   const resetAllProgress = useCallback(() => {
     const fresh = clearStorage();
     setProgress(fresh);

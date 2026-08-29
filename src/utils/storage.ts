@@ -1,16 +1,18 @@
 ﻿import { STORAGE_KEY } from '../constants';
 import type { UserProgress } from '../types/game';
+import { STAGES } from '../data/stages';
 
 export const DEFAULT_USER_PROGRESS: UserProgress = {
-  unlockedStages: ['stage_1_1'],
+  unlockedStages: STAGES.map((s) => s.id),
   completedStages: {},
   soundEnabled: true,
 };
 
 /**
- * localStorage から進捗を取得する（例外安全）
+ * localStorage から進捗を取得する（全ステージ開放）
  */
 export const loadProgress = (): UserProgress => {
+  const allStageIds = STAGES.map((s) => s.id);
   try {
     if (typeof window === 'undefined' || !window.localStorage) {
       return DEFAULT_USER_PROGRESS;
@@ -19,12 +21,12 @@ export const loadProgress = (): UserProgress => {
     if (!raw) return DEFAULT_USER_PROGRESS;
     const parsed = JSON.parse(raw) as Partial<UserProgress>;
     return {
-      unlockedStages: Array.isArray(parsed.unlockedStages) && parsed.unlockedStages.length > 0
-        ? parsed.unlockedStages
-        : ['stage_1_1'],
-      completedStages: parsed.completedStages && typeof parsed.completedStages === 'object'
-        ? parsed.completedStages
-        : {},
+      // 最初から全ステージを選択可能にする
+      unlockedStages: allStageIds,
+      completedStages:
+        parsed.completedStages && typeof parsed.completedStages === 'object'
+          ? parsed.completedStages
+          : {},
       soundEnabled: typeof parsed.soundEnabled === 'boolean' ? parsed.soundEnabled : true,
     };
   } catch (err) {
