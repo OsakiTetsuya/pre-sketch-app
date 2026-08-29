@@ -9,8 +9,7 @@
 
 ## 0. この文書の読み方（実装者への注意）
 
-本書は「元の企画仕様書」をレビューし、**そのままでは動作しない箇所を修正した確定版**である。
-元仕様書に存在した4件の技術的欠陥（第16章に一覧）はすでに修正済みであり、**本書の記述が常に優先される**。
+本書が本アプリの唯一の仕様である。**本書の記述が常に優先される。**
 
 実装時に判断に迷ったら、以下の優先順位で決めること。
 
@@ -51,6 +50,21 @@
 
 **難所は1箇所に集中している**: 「指の座標列」と「お手本の座標列」を突き合わせて "なぞれた" と判定するロジック（第6章）。
 それ以外は素直な React 実装である。
+
+### 1.4 対応環境
+
+| 区分 | 環境 | 位置づけ |
+|---|---|---|
+| **主対象** | iPad Safari（iPadOS 16 以降） | 子どもが実際に使う |
+| **主対象** | **Android Chrome（Android 10 以降）** | 子どもが実際に使う |
+| 副対象 | デスクトップ Chrome / Edge / Safari | 開発と動作確認 |
+| 対象外 | Internet Explorer、旧 Edge、Firefox for Android | 動けばよいが保証しない |
+
+**主対象の2つは同等に扱う。**「iPad で動けばよい」という前提を置かないこと。
+Android は端末ごとに DPR・画面比・性能の幅が大きく、iOS より条件が厳しい場面がある（第8.4節）。
+
+3環境すべてを **Pointer Events の単一コードパス**で扱う。
+**UA 判定による分岐を書かないこと。** 本書に記載した対策はすべて全環境で有効である。
 
 ---
 
@@ -106,9 +120,9 @@
 
 - **決定**: 点線を無視して画面を塗りつぶすように動かしても**クリアにしない**。
   始点から順に通過したかを追跡する。ただし逆走・指離し・多少の飛ばしには寛容にする
-- **理由**: 元仕様書のコード例は順序を検証していなかったため、画面をぐしゃぐしゃに塗れば
-  100% クリアできてしまった。「なぞる」ことを教えるアプリで、なぞらなくてもクリアできると
-  形態認知の学習が成立しない
+- **理由**: 順序を検証しない実装（各お手本点の近くを「いつか」通ったかだけを見る方式）にすると、
+  画面をぐしゃぐしゃに塗るだけで 100% クリアできてしまう。「なぞる」ことを教えるアプリで、
+  なぞらなくてもクリアできると形態認知の学習が成立しない
 - **寛容さの担保**: 2〜3歳児は指を離すし逆走もする。それらは第6章のアルゴリズムで吸収する
 
 ---
@@ -141,21 +155,25 @@
 
 ### 4.1 画面遷移図
 
+```mermaid
+stateDiagram-v2
+    [*] --> Home
+
+    Home: HomeScreen 〜 あそぶ / 音量トグル / 保護者メニュー
+    Select: StageSelectScreen 〜 12枚のステージカード（開放済 / ロック）
+    Play: PlayScreen 〜 正方形キャンバス / もどる / やりなおし
+
+    Home --> Select: あそぶ をタップ
+    Select --> Home: もどる
+    Select --> Play: 開放済カードをタップ
+    Play --> Select: もどる
+    Play --> Play: 完成 → つぎへ（次を開放して遷移）
+    Play --> Play: 完成 → もういちど
+    Play --> Select: 完成 → つぎへ（最終ステージのとき）
 ```
-  ┌─────────────┐
-  │ HomeScreen  │  「あそぶ」ボタン / 音量トグル / 保護者メニュー
-  └──────┬──────┘
-         │ 「あそぶ」タップ
-         ▼
-  ┌──────────────────┐
-  │ StageSelectScreen │  12枚のステージカード（開放済 / ロック）
-  └──────┬───────────┘
-         │ 開放済カードをタップ        ▲
-         ▼                             │ 「もどる」/ 完成モーダルの「つぎへ」
-  ┌─────────────┐                     │
-  │ PlayScreen  │─────────────────────┘
-  └─────────────┘
-```
+
+ロック済みカードのタップは**遷移しない**（音も鳴らさない）。
+ブラウザの戻る操作については第8.4節を参照。
 
 状態は `App.tsx` が保持する。
 
@@ -274,6 +292,34 @@ const toNormalized = (e: PointerEvent, canvas: HTMLCanvasElement): Point => {
 };
 ```
 
+### 5.4 ビューポート高の変動への対応 ★Android Chrome で重要
+
+Android Chrome はスクロールや操作に応じてアドレスバーが出入りし、**`window.innerHeight` が動的に変わる**。
+キャンバスサイズを `innerHeight` から算出しているため、素朴に実装すると
+**プレイ中にキャンバスが突然リサイズされ、描いている途中の線が消える**という事故が起きる。
+
+対策は4つ。すべて実施すること。
+
+1. CSS の高さは **`100dvh`（dynamic viewport height）**を使う。`100vh` は使わない
+2. `resize` / `orientationchange` はそのまま拾わず、**150ms のデバウンス**をかける
+3. **ポインタ追跡中（`activeId.current !== null`）はリサイズを保留する。** 指が離れてから適用する
+4. リサイズ適用時は、ユーザーの軌跡を新しいサイズで**描き直す**
+
+```ts
+const pendingResize = useRef(false);
+
+const applyResize = () => {
+  if (activeId.current !== null) { pendingResize.current = true; return; } // 描画中は触らない
+  // side を再計算 → canvas を再設定 → 軌跡を再描画
+};
+
+// pointerup / pointercancel の最後で
+if (pendingResize.current) { pendingResize.current = false; applyResize(); }
+```
+
+**軌跡を正規化座標で保持していること**（第5.1節）が前提である。
+CSS ピクセルで保持していると、リサイズや画面回転のたびに図形が崩れる。
+
 ---
 
 ## 6. なぞり判定アルゴリズム ★本アプリの中核
@@ -306,7 +352,7 @@ const toNormalized = (e: PointerEvent, canvas: HTMLCanvasElement): Point => {
 
 ### 6.3 進行アルゴリズム（Progressive Cursor with Lookahead）
 
-**これが元仕様書からの最重要の修正点である。**
+**本アプリで最も重要なロジックである。ここを簡略化しないこと。**
 
 ```ts
 export type TraceState = {
@@ -511,9 +557,12 @@ export const drawSmoothPath = (
 
 ### 8.1 Pointer Events を使う（Touch Events は使わない）
 
-元仕様書は Touch Events と「Identifier: 0 を追跡する」を前提としていたが、
-**`Touch.identifier` が 0 から始まる保証は仕様上存在しない**（iOS Safari では任意の整数が入る）。
 Pointer Events はマウス・タッチ・ペンを統一的に扱え、`pointerId` と `setPointerCapture` が使える。
+PC・iPad・Android の3環境を1つのコードパスで扱えるため、本アプリでは必須とする。
+
+**Touch Events で「Identifier: 0 の指だけを追跡する」という実装をしないこと。**
+`Touch.identifier` が 0 から始まる保証は仕様上存在せず（iOS Safari では任意の整数が入る）、
+実機で線が飛ぶ原因になる。
 
 ### 8.2 マルチタッチ／パームリジェクション
 
@@ -562,7 +611,44 @@ canvas {
       content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover" />
 ```
 
-さらに `document.body` に `overscroll-behavior: none` を指定し、iOS のバウンススクロールを抑止する。
+加えて `body` 側にも指定する。`touch-action: none` はキャンバスにしか効かないため、
+**キャンバス外の余白を引っぱった時のプルダウンリロード（Android Chrome）とバウンススクロール（iOS）は防げない。**
+
+```css
+html, body {
+  height: 100dvh;              /* 100vh は使わない（第5.4節） */
+  margin: 0;
+  overflow: hidden;
+  overscroll-behavior-y: contain;
+}
+```
+
+### 8.4 環境固有の対応（Android Chrome を含む）
+
+以下はすべて**全環境で有効な実装**である。UA 判定による分岐は書かないこと。
+
+| 事象 | 主に発生する環境 | 対策 |
+|---|---|---|
+| 画面を下に引くと**リロードされる** | Android Chrome | `body { overscroll-behavior-y: contain; }` を必ず指定する。キャンバスの `touch-action: none` だけでは防げない（キャンバス外の余白で発生する） |
+| アドレスバーの出入りでキャンバスが縮む | Android Chrome | 第5.4節 |
+| **戻る操作でアプリから離脱する** | Android Chrome / ジェスチャーナビ | 起動時に `history.pushState` でダミー履歴を1つ積み、`popstate` を「1画面戻る」に読み替える。Home 画面での戻る操作のみ離脱を許す |
+| 音が鳴らない | iOS Safari / Android Chrome 共通 | ユーザー操作のハンドラ内で `AudioContext.resume()`（第9.2節） |
+| DPR が 2.625 / 3.5 等の端数 | Android 全般 | `canvas.width = Math.round(side * dpr)` で丸める。丸めないと 1px のにじみが出る |
+| 高 DPR × 大画面でメモリを圧迫する | Android 全般 | 実効 DPR に上限を設ける: `Math.min(window.devicePixelRatio || 1, 3)` |
+| 低スペック端末で粒子演出が重い | Android 全般 | `PARTICLE_LIMIT`（120）を守る。加えて実測 fps が 45 を下回った場合は粒子の生成レートを半減させる |
+| プレイ中に画面が消灯する | Android Chrome / iOS 16.4 以降 | 任意。`navigator.wakeLock?.request('screen')` を try/catch で呼ぶ。失敗しても無視してよい |
+
+```ts
+// 戻る操作の吸収（main.tsx または App.tsx の初期化時）
+history.pushState({ app: true }, '');
+window.addEventListener('popstate', () => {
+  history.pushState({ app: true }, ''); // 履歴を積み直して離脱を防ぐ
+  goBackOneScreen();                    // play → stageSelect → home
+});
+```
+
+Home 画面でさらに戻ろうとした場合のみ、履歴を積み直さずに離脱を許すこと。
+**幼児が誤操作でアプリから出てしまうのを防ぐのが目的**であり、保護者が離脱できなくなってはいけない。
 
 ---
 
@@ -570,8 +656,9 @@ canvas {
 
 ### 9.1 AudioContext はシングルトンにする ★重要
 
-元仕様書は `playTone` の呼び出しごとに `new AudioContext()` していた。
-`playStroke()` は指を動かすたびに呼ばれるため、**数秒で上限（Chrome で約6個）に達し、以降は完全に無音になる。**
+**`playTone` の呼び出しごとに `new AudioContext()` してはならない。**
+`playStroke()` は指を動かすたびに呼ばれるため、**数秒で上限（デスクトップ Chrome / Android Chrome ともに約6個）に達し、
+以降このタブは完全に無音になる。** リロードするまで復旧しない。
 モジュールスコープで1個だけ生成し、使い回すこと。
 
 ```ts
@@ -682,7 +769,7 @@ const playTone = (
 
 ### 10.4 完成時の着色 ★重要：開いた線には塗りつぶしが成立しない
 
-元仕様書は「なぞった輪郭線の内側に自動着色する」としていたが、
+「なぞった輪郭線の内側に自動着色する」という単一の演出では成立しない。
 **Stage 1（たてせん・よこせん・ぐるぐるせん）は閉じた図形ではないため「内側」が存在しない。**
 
 `StageData.completionEffect` で2種類を切り替える。
@@ -713,26 +800,47 @@ confetti({
 
 ### 11.1 全体構成
 
-```
-Stage 1: せんをひこう（運筆の基礎）
- ├── 1-1: たてせん      （あめが ざーざー）
- ├── 1-2: よこせん      （くるまが びゅーん）
- └── 1-3: ぐるぐるせん  （キャンディ ぺろぺろ）
+矢印は解放順序を表す。あるステージをクリアすると、次の1つだけが解放される。
 
-Stage 2: まるをかこう（閉じた輪の認識）
- ├── 2-1: おおきなまる  （あかい りんご）
- ├── 2-2: まるふたつ    （ゆきだるま）
- └── 2-3: まる＋せん    （ぽかぽか たいよう）
+```mermaid
+flowchart LR
+    subgraph S1["Stage 1: せんをひこう（運筆の基礎）"]
+        direction TB
+        A1["1-1 たてせん<br/>あめが ざーざー"]
+        A2["1-2 よこせん<br/>くるまが びゅーん"]
+        A3["1-3 ぐるぐるせん<br/>キャンディ ぺろぺろ"]
+        A1 --> A2 --> A3
+    end
 
-Stage 3: さんかく・しかく（角の認識）
- ├── 3-1: さんかく      （おいしい おにぎり）
- ├── 3-2: しかく        （プレゼント ばこ）
- └── 3-3: さんかく＋しかく（とんがり おうち）
+    subgraph S2["Stage 2: まるをかこう（閉じた輪の認識）"]
+        direction TB
+        B1["2-1 おおきなまる<br/>あかい りんご"]
+        B2["2-2 まるふたつ<br/>ゆきだるま"]
+        B3["2-3 まる＋せん<br/>ぽかぽか たいよう"]
+        B1 --> B2 --> B3
+    end
 
-Stage 4: かたちの合体（見立てデッサン）
- ├── 4-1: △＋○        （アイスクリーム）
- ├── 4-2: □＋○＋○    （ぶーぶー くるま）
- └── 4-3: ○＋△＋△    （かわいい ねこさん）
+    subgraph S3["Stage 3: さんかく・しかく（角の認識）"]
+        direction TB
+        C1["3-1 さんかく<br/>おいしい おにぎり"]
+        C2["3-2 しかく<br/>プレゼント ばこ"]
+        C3["3-3 さんかく＋しかく<br/>とんがり おうち"]
+        C1 --> C2 --> C3
+    end
+
+    subgraph S4["Stage 4: かたちの合体（見立てデッサン）"]
+        direction TB
+        D1["4-1 △＋○<br/>アイスクリーム"]
+        D2["4-2 □＋○＋○<br/>ぶーぶー くるま"]
+        D3["4-3 ○＋△＋△<br/>かわいい ねこさん"]
+        D1 --> D2 --> D3
+    end
+
+    START(("はじめ")) --> A1
+    A3 --> B1
+    B3 --> C1
+    C3 --> D1
+    D3 --> GOAL(("ぜんぶ<br/>クリア"))
 ```
 
 **難度設計の原則**: なぞるパスの本数が学習負荷そのものである。
@@ -1050,8 +1158,105 @@ Vite の初期化はこのフォルダの中身を消さないよう、既存デ
 npm run dev -- --host
 ```
 
-表示された LAN の URL（`http://192.168.x.x:5173`）を iPad の Safari で開き、
+表示された LAN の URL（`http://192.168.x.x:5173`）を **iPad の Safari と Android の Chrome の両方**で開き、
 実際に指で操作して調整する。**マウスでの確認だけで完了としないこと。**
+
+Android Chrome の確認は、第17章の 12〜16 番を1つずつ手で試すこと。
+特に「余白を下に引っぱる」「アドレスバーを出入りさせながら描く」「戻るジェスチャ」の3つは
+**マウスでもiPadでも再現しないため、Android 実機でしか見つからない。**
+
+`npm run dev -- --host` の URL は同一 Wi-Fi 内からのみ到達できる。
+どの端末からでも同じ URL で開けるようにする場合は Step 8 を実施する。
+
+### Step 8: GitHub Pages への公開（任意）
+
+同一 Wi-Fi に依存せず、iPad・Android・PC のどこからでも同じ URL でアクセスできるようにする。
+
+**前提と制約**
+
+- GitHub の**パブリックリポジトリ**が必要（無料プランでは Pages はパブリックのみ）。
+  ソースコードが公開される。本アプリは個人情報も秘密情報も持たないため実害はないが、承知しておくこと
+- 公開 URL には認証がかからない。誰でもアクセスできる
+- 進捗は端末ごとの localStorage に保存されるため、**端末間で同期しない**
+- Service Worker を持たないため（第15章スコープ外）、**起動時にネット接続が必要**。
+  一度開いた後の動作はオフラインでも問題ないが、機内モードで新規に開くことはできない
+
+**1. `vite.config.ts` の `base` 設定** ← ここが最も多い失敗箇所
+
+GitHub Pages は `https://<ユーザー名>.github.io/<リポジトリ名>/` に配信される。
+`base` を設定しないとアセットが `/assets/...` という絶対パスで参照され、**画面が真っ白になる**。
+
+```ts
+// vite.config.ts
+import { defineConfig } from 'vite';
+import react from '@vitejs/plugin-react';
+
+export default defineConfig({
+  plugins: [react()],
+  base: '/pre-sketch-app/',   // ← リポジトリ名と完全に一致させること
+});
+```
+
+**2. GitHub Actions のワークフロー**
+
+`.github/workflows/deploy.yml` を作成する。
+
+```yaml
+name: Deploy to GitHub Pages
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: dist
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4
+```
+
+**3. リポジトリ側の設定**
+
+GitHub のリポジトリ → **Settings → Pages → Source** を **「GitHub Actions」**に変更する。
+既定の「Deploy from a branch」のままではこのワークフローが反映されない。
+
+**4. 確認**
+
+`main` に push すると自動でビルド・公開される。
+URL は `https://<ユーザー名>.github.io/pre-sketch-app/`。
+iPad の Safari と Android の Chrome でこの URL を開き、「ホーム画面に追加」する。
+
+**HTTPS で配信されるため Web Audio API の動作条件も満たす**
+（`http://` の LAN 開発サーバーより条件が良い）。
 
 ---
 
@@ -1072,18 +1277,25 @@ npm run dev -- --host
 
 ---
 
-## 16. 元仕様書からの修正点一覧
+## 16. 実装時に踏みやすい落とし穴
 
-実装者への申し送り。元の企画仕様書には以下の欠陥があり、本書ではすべて修正済みである。
-**元仕様書のコード例を参照しないこと。**
+いずれも**「実装直後は動いて見えるが、実機で数分使うと破綻する」**類のものである。
+コードを書く前に一読すること。
 
-| # | 欠陥 | 症状 | 本書での対応 |
+| # | やってはいけないこと | 実機で起きること | 正しい実装 |
 |---|---|---|---|
-| 1 | `playTone` が呼び出しごとに `new AudioContext()` | 指を数秒動かすと AudioContext 上限に達し、**以降完全に無音**になる | 第9.1節：モジュールスコープのシングルトン化 |
-| 2 | `checkPathProgress` が通過順序を検証していない | 画面をぐしゃぐしゃに塗りつぶすだけで **100% クリアできる**。なぞる学習が成立しない | 第6.3節：`advanceTrace`（順序付きカーソル + Lookahead） |
-| 3 | 「マルチタッチは Identifier: 0 のみ追跡」 | `Touch.identifier` が 0 から始まる保証は仕様上なく、**iOS で線が飛ぶ** | 第8.2節：Pointer Events + 最初の `pointerId` を保持 |
-| 4 | 「輪郭線の内側を自動着色」 | Stage 1 は開いた線であり**内側が存在しない**。演出が成立しない | 第10.4節：`completionEffect: 'fill' \| 'motif'` で分岐 |
-| 5 | 非正方形キャンバスでの正規化距離 | 判定領域が楕円に歪み、「縦は当たるのに横は厳しい」違和感が出る | 決定4：キャンバスを常に正方形にし、補正を不要にする |
+| 1 | `playTone` の呼び出しごとに `new AudioContext()` する | 指を数秒動かすと AudioContext 上限に達し、**以降そのタブは完全に無音**。リロードするまで戻らない | 第9.1節 シングルトン化 |
+| 2 | 通過順序を見ずに進行度を計算する（各点の近くを「いつか」通ったかだけ見る） | 画面をぐしゃぐしゃに塗るだけで **100% クリアできる**。なぞる学習が成立しない | 第6.3節 `advanceTrace` |
+| 3 | Touch Events を使い `identifier === 0` の指を追跡する | `Touch.identifier` が 0 から始まる保証はなく、**iOS で線が飛ぶ** | 第8.2節 Pointer Events |
+| 4 | 完成演出を「輪郭の内側の塗りつぶし」だけにする | Stage 1 は開いた線で**内側が存在しない**。演出が発火しない | 第10.4節 `completionEffect` |
+| 5 | キャンバスを画面いっぱいの長方形にする | 正規化距離が歪んで判定領域が楕円になり、「縦は当たるのに横は厳しい」違和感が出る | 決定4 正方形 |
+| 6 | `100vh` でレイアウトする | **Android Chrome** でアドレスバーの出入りのたびに高さが変わり、レイアウトが跳ねる | 第5.4節 `100dvh` |
+| 7 | `resize` を即座にキャンバスへ反映する | **描画の途中でキャンバスが作り直され、引いていた線が消える** | 第5.4節 デバウンス + 追跡中は保留 |
+| 8 | `overscroll-behavior` を指定しない | **Android Chrome** でキャンバス外を引っぱるとページがリロードされ、進行中のステージが消える | 第8.3節 |
+| 9 | `pointerup` だけを処理し `pointercancel` を無視する | 通知やシステムジェスチャで指の追跡が解除されず、**以降どの指も反応しなくなる** | 第8.2節 両方を処理 |
+| 10 | 軌跡を CSS ピクセル座標で保持する | 画面回転・リサイズのたびに描いた図形が崩れる | 第5.1節 正規化座標で保持 |
+| 11 | DPR を丸めずに使う | Android の端数 DPR（2.625 等）で線が 1px にじむ | 第8.4節 `Math.round` |
+| 12 | UA 判定で iOS / Android の分岐を書く | 端末が増えるたびに破綻する。本書の対策はすべて全環境で有効 | 第1.4節 |
 
 ---
 
@@ -1093,7 +1305,8 @@ npm run dev -- --host
 
 ### 機能
 
-1. PC のブラウザと iPad の Safari の両方で全画面表示され、マウス／指のどちらでも点線をなめらかになぞれる
+1. **PC ブラウザ・iPad Safari・Android Chrome の3環境すべて**で全画面表示され、
+   マウス／指のどちらでも点線をなめらかになぞれる
 2. 始点から順になぞると進行度が上がり、70% を超えた時点で完成演出（塗り or モチーフ、音、紙吹雪）が発火する
 3. **画面をランダムに塗りつぶしてもクリアできない**（第6.4節の設計目標）
 4. 指を離しても進行度がリセットされない。逆走しても進行度が減らない
@@ -1104,14 +1317,24 @@ npm run dev -- --host
 9. なぞり続けても音が途切れない（AudioContext のリークがない）
 10. ペアレンタルゲート（3秒長押し）を経ないと設定・リセットに到達できない
 
+### 環境別（主対象2環境で individually 確認すること）
+
+11. **iPad**: 縦持ち・横持ちの両方で図形が正しい形（歪みなし）で表示される
+12. **Android Chrome**: キャンバス外の余白を下に引っぱっても**ページがリロードされない**
+13. **Android Chrome**: プレイ中にアドレスバーが出入りしても**キャンバスがリサイズされず、線が消えない**
+14. **Android Chrome**: 戻るジェスチャ／戻るボタンで**アプリから離脱せず**、1画面戻る
+    （ただし Home 画面からは離脱できる）
+15. **iPad / Android 共通**: 最初のタップ以降、音が正常に鳴る（AudioContext の解禁）
+16. **iPad / Android 共通**: 高 DPR ディスプレイで線がぼやけない、にじまない
+
 ### 品質
 
-11. `npm run build` が TypeScript エラー 0 で完了する
-12. `npx tsc --noEmit` が通る
-13. iPad の縦持ち・横持ちの両方で図形が正しい形（歪みなし）で表示される
-14. Retina ディスプレイで線がぼやけない（DPR 対応）
-15. すべてのタップ対象が 64×64px 以上ある
-16. なぞっている間、iPad 実機で 60fps を維持する（Safari の Web Inspector で確認）
+17. `npm run build` が TypeScript エラー 0 で完了する
+18. `npx tsc --noEmit` が通る
+19. すべてのタップ対象が 64×64px 以上ある
+20. なぞっている間、**iPad と Android の実機どちらでも** 60fps を維持する
+    （Safari の Web Inspector / Chrome の `chrome://inspect` で確認）
+21. UA 判定による環境分岐がコード中に存在しない
 
 ---
 
