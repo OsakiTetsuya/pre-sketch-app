@@ -359,15 +359,18 @@ export type TraceState = {
   cursor: number;      // 次に通過すべきチェックポイントの index
   passed: boolean[];   // 各チェックポイントの通過フラグ
   started: boolean;    // 始点に触れて開始済みか
+  onPathRate: number;  // 入力点がガイド上にあった割合の指数移動平均。初期値 1.0
 };
 
 export const createTraceState = (n: number): TraceState => ({
   cursor: 0,
   passed: new Array(n).fill(false),
   started: false,
+  onPathRate: 1,
 });
 
-const LOOKAHEAD = 3; // 3個先までなら飛ばしを許容
+const LOOKAHEAD = 3;           // 3個先までなら飛ばしを許容
+const ON_PATH_ALPHA = 0.02;    // on-path 率の指数移動平均の係数
 
 /**
  * 指の現在位置 p を受け取り、進行状態を更新して返す（純関数）。
@@ -378,51 +381,126 @@ export const advanceTrace = (
   p: Point,
   tolerance: number
 ): TraceState => {
+  if (checkpoints.length === 0) return state;
+
   // --- 開始判定: 始点付近に触れるまで何も進めない ---
   if (!state.started) {
     if (dist(p, checkpoints[0]) > tolerance) return state;
     return advanceTrace({ ...state, started: true }, checkpoints, p, tolerance);
   }
 
+  // --- on-path 率の更新（開始以降のすべての点が対象。第6.6節）---
+  // パス全体のどのチェックポイントかに近ければ on-path とみなす。
+  // 「カーソル近傍のみ」にすると、仕様で許容している逆走が off-path 扱いになる。
+  const onPath = checkpoints.some((c) => dist(p, c) <= tolerance) ? 1 : 0;
+  const counted: TraceState = {
+    ...state,
+    onPathRate: state.onPathRate * (1 - ON_PATH_ALPHA) + onPath * ON_PATH_ALPHA,
+  };
+
+  if (counted.cursor >= checkpoints.length) return counted;
+
   // --- 進行判定: cursor から LOOKAHEAD 先までを順に見る ---
-  const end = Math.min(state.cursor + LOOKAHEAD, checkpoints.length - 1);
-  for (let i = state.cursor; i <= end; i++) {
+  const end = Math.min(counted.cursor + LOOKAHEAD, checkpoints.length - 1);
+  for (let i = counted.cursor; i <= end; i++) {
     if (dist(p, checkpoints[i]) <= tolerance) {
-      const passed = [...state.passed];
+      const passed = [...counted.passed];
       // 飛ばした分もまとめて通過扱いにする（寛容さの担保）
-      for (let j = state.cursor; j <= i; j++) passed[j] = true;
-      return { ...state, passed, cursor: i + 1 };
+      for (let j = counted.cursor; j <= i; j++) passed[j] = true;
+      return { ...counted, passed, cursor: i + 1 };
     }
   }
-  return state; // どこにも当たらなければ何も起きない（＝失敗ではない）
+  return counted; // どこにも当たらなければ進まない（＝失敗ではない）
 };
 
 export const traceProgress = (state: TraceState): number =>
-  state.passed.filter(Boolean).length / state.passed.length;
+  state.passed.length === 0 ? 0 : state.passed.filter(Boolean).length / state.passed.length;
 ```
+
+### 6.3.1 なぜ on-path 率が必要か ★重要
+
+**進行度の順序チェックだけでは、直線を使うステージの塗りつぶしを防げない。**
+
+直線上のチェックポイントは一列に並んでいるため、指が線の上を往復すれば
+必然的に順序どおりに通過する。順序制約が何も制約していない。実測値は以下のとおり。
+
+| 対象 | 塗りつぶし入力の点数 | 順序チェックあり | 順序チェックなし |
+|---|---|---|---|
+| 直線 | 1000 | **71.4%（クリア成立）** | 71.4% |
+| 直線 | 3000 | 71.4% | 71.4% |
+| 円 | 3000 | 9.5% | 90.5% |
+| 円 | 10000 | 73.8%（クリア成立） | 100% |
+
+円などの閉じた図形では順序チェックが有効に働くが、直線では効果がゼロである。
+
+そこで進行度とは別に「入力点がガイド上にあった割合（on-path 率）」を持ち、
+完成条件を二つにする。実測した分離は明確である。
+
+| 入力の種類 | on-path 率 |
+|---|---|
+| ぐしゃぐしゃ描き（直線） | 5.9 〜 15.3% |
+| ぐしゃぐしゃ描き（円） | 23.0 〜 30.3% |
+| なぞり σ=0.04 | 89.3 〜 96.4% |
+| なぞり σ=0.06 | 76.2 〜 87.5% |
+| **なぞり σ=0.08（かなり雑）** | **66.7 〜 71.4%** |
+
+`ON_PATH_THRESHOLD = 0.5` は、塗りつぶしの最大 30.3% と雑ななぞりの最小 66.7% のほぼ中間にある。
+
+**累積平均ではなく指数移動平均を使うこと。** 累積平均にすると
+「最初にさんざん塗りつぶした子が、その後まじめになぞっても率が回復せず永久にクリアできない」
+という失敗状態が生まれ、第2章 決定7（失敗体験を作らない）に反する。
 
 ### 6.4 このアルゴリズムが要件を満たす理由
 
 | 要件 | 満たされ方 |
 |---|---|
-| 塗りつぶしでクリアできない | `cursor` は「3個先まで」しか進まない。離れた位置を触っても前進しないため、実際に線に沿って移動する以外に進行度は上がらない |
-| 逆走してもよい | 逆走時は `cursor` より手前の点に触れるだけ。ループが空振りして `state` が変わらない。減点も発生しない |
+| 塗りつぶしでクリアできない | **2段構え**。閉じた図形は `cursor` の順序チェックが効く（3個先までしか進まない）。直線は順序チェックが効かないため、**on-path 率のゲートで止める**（第6.3.1節） |
+| 逆走してもよい | 逆走時は `cursor` より手前の点に触れるだけ。ループが空振りして `cursor` が変わらない。減点も発生しない。逆走中も指はガイド上にあるため on-path 率は下がらない |
 | 指を離してよい | `TraceState` は `pointerup` でリセットしない。次に触れた時、`cursor` の位置から再開する |
 | 多少の飛ばしを許す | `LOOKAHEAD = 3` と、飛ばした区間をまとめて `passed` にする処理 |
-| 失敗が存在しない | 判定に失敗を表す状態がない。前進しないだけ |
+| 失敗が存在しない | 判定に失敗を表す状態がない。前進しないだけ。on-path 率も指数移動平均なので、雑に描いた後にまじめになぞれば回復する |
 
 ### 6.5 完成判定
 
 ```ts
-const COMPLETION_THRESHOLD = 0.7; // 70%
+const COMPLETION_THRESHOLD = 0.7; // 進行度の閾値
+const ON_PATH_THRESHOLD = 0.5;    // ガイド上に居た割合の下限
 
-// 全ガイドパスがそれぞれ 70% 以上でステージクリア
-const isStageComplete = (states: TraceState[]) =>
-  states.every(s => traceProgress(s) >= COMPLETION_THRESHOLD);
+/** 1つのパスが完了しているか。進行度と on-path 率の両方を満たすこと */
+export const isPathComplete = (s: TraceState): boolean =>
+  traceProgress(s) >= COMPLETION_THRESHOLD && s.onPathRate >= ON_PATH_THRESHOLD;
+
+export const isStageComplete = (states: TraceState[]): boolean =>
+  states.length > 0 && states.every(isPathComplete);
 ```
 
-- 複数パスを持つステージ（例: Stage 1-1 の3本の線）は、**すべてのパスが個別に 70% を超える**必要がある
-- どのパスから描き始めてもよい。`pointerdown` の位置から、**未完成パスのうち始点が最も近いもの**を判定対象として選ぶ
+- 複数パスを持つステージ（例: Stage 1-1 の3本の線）は、**すべてのパスが個別に条件を満たす**必要がある
+- どのパスから描き始めてもよい。`pointerdown` の位置から、**未完成パスのうち最も近いもの1つ**を
+  判定対象として選び、そのストロークの間はそのパスだけを進める
+
+**選択したパス以外に入力点を流し込まないこと。** 全パスに流すと、図形が重なるステージで
+なぞっていないパスが勝手に進む。実測では Stage 4-3（ねこさん）で顔の円をなぞるだけで
+**左耳が 60% 進み**、閾値 70% に対してほぼ描かずにクリアできてしまう。
+
+```ts
+/** 未完成パスのうち、指の位置に最も近いものを選ぶ */
+const pickPath = (p: Point, paths: PathSegment[], states: TraceState[]): number => {
+  let best = -1, bestD = Infinity;
+  paths.forEach((path, i) => {
+    const st = states[i];
+    if (!st || isPathComplete(st)) return;          // 完成済みは対象外
+    // 開始済みなら現在のカーソル位置、未開始なら始点を基準に測る
+    const anchor = st.started
+      ? path.points[Math.min(st.cursor, path.points.length - 1)]
+      : path.points[0];
+    const d = dist(p, anchor);
+    if (d < bestD) { bestD = d; best = i; }
+  });
+  return best;
+};
+```
+
+開始済みのパスでカーソル位置を基準にするのは、**指を離して途中から再開する動作を素直に扱うため**である。
 
 ### 6.6 パス生成ヘルパー（`utils/geometry.ts`）
 
@@ -856,7 +934,7 @@ flowchart LR
 | `stage_1_2` | よこせん | くるま | 横線 ×3 | `#dc2626` | `#f87171` | `motif` |
 | `stage_1_3` | ぐるぐるせん | キャンディ | 渦巻き ×1 | `#db2777` | `#f9a8d4` | `motif` |
 | `stage_2_1` | おおきなまる | りんご | 円 ×1 | `#dc2626` | `#ef4444` | `fill` |
-| `stage_2_2` | まるふたつ | ゆきだるま | 円 ×2 | `#0369a1` | `#e0f2fe` | `fill` |
+| `stage_2_2` | まるふたつ | ゆきだるま | 円 ×2 | `#0369a1` | `#bae6fd` | `fill` |
 | `stage_2_3` | まる＋せん | たいよう | 円 ×1 + 直線 ×4 | `#ea580c` | `#fbbf24` | `fill` |
 | `stage_3_1` | さんかく | おにぎり | 三角 ×1 | `#57534e` | `#f5f5f4` | `fill` |
 | `stage_3_2` | しかく | プレゼント | 四角 ×1 | `#7c3aed` | `#c4b5fd` | `fill` |
@@ -1016,6 +1094,8 @@ export type TraceState = {
   cursor: number;
   passed: boolean[];
   started: boolean;
+  /** 入力点がガイド上にあった割合の指数移動平均。初期値 1.0（第6.3.1節） */
+  onPathRate: number;
 };
 
 export type Screen =
@@ -1030,7 +1110,9 @@ export type Screen =
 export const CHECKPOINT_STEP = 0.05;      // チェックポイント間隔（正規化）
 export const DEFAULT_TOLERANCE = 0.08;    // 判定許容半径（正規化）
 export const LOOKAHEAD = 3;               // 飛ばし許容数
-export const COMPLETION_THRESHOLD = 0.7;  // クリア閾値
+export const COMPLETION_THRESHOLD = 0.7;  // 進行度の閾値
+export const ON_PATH_THRESHOLD = 0.5;     // ガイド上に居た割合の下限（塗りつぶし対策）
+export const ON_PATH_ALPHA = 0.02;        // on-path 率の指数移動平均の係数
 export const STROKE_WIDTH = 20;           // 線幅（CSS px）
 export const MIN_POINT_DISTANCE = 0.004;  // 軌跡点の間引き距離（正規化）
 export const MAX_CANVAS_SIZE = 900;       // キャンバス上限（CSS px）
@@ -1129,7 +1211,11 @@ Vite の初期化はこのフォルダの中身を消さないよう、既存デ
 
 - 始点に触れずに中間点を触っても進まない
 - 線に沿って順に触れると `progress` が 1.0 に達する
-- 遠く離れた点を無作為に触っても `progress` が 0 のまま（塗りつぶし対策）
+- 遠く離れた点を無作為に触っても `progress` が 0 のまま
+- **ランダムウォークで 3000 点を流し込んでも `isPathComplete` が false のまま（塗りつぶし対策）。
+  「パスから遠い数点を試す」だけのテストでは不十分である。順序チェックの有無にかかわらず 0% になるため、
+  実装が正しいかどうかを区別できない**
+- 各チェックポイントを ±0.02 揺らしながら通過すれば `isPathComplete` が true になる（甘口判定の維持）
 - 逆走しても `progress` が減らない
 
 ### Step 3: 描画エンジン
@@ -1296,6 +1382,10 @@ iPad の Safari と Android の Chrome でこの URL を開き、「ホーム画
 | 10 | 軌跡を CSS ピクセル座標で保持する | 画面回転・リサイズのたびに描いた図形が崩れる | 第5.1節 正規化座標で保持 |
 | 11 | DPR を丸めずに使う | Android の端数 DPR（2.625 等）で線が 1px にじむ | 第8.4節 `Math.round` |
 | 12 | UA 判定で iOS / Android の分岐を書く | 端末が増えるたびに破綻する。本書の対策はすべて全環境で有効 | 第1.4節 |
+| 13 | 描画コンポーネントの `key` に表示状態（`isCompleted` 等）を含める | key が変わるとコンポーネントが作り直され、**ref に持っていた描画データが全部消える**。完成演出が白紙の上で走る | key に入れてよいのは「別のものになった」ときだけ |
+| 14 | `setState` の updater 関数の中で副作用（別の setState、コールバック、音）を起こす | updater は純粋でなければならず、**StrictMode は2回実行する**。音を繋いだ瞬間に「毎回2回鳴る」として表面化し、原因が音側に見えるためデバッグが長引く | 値を ref で持ち、`setState` には計算済みの値を渡す。副作用は updater の外へ |
+| 15 | 「保留する」機構を書いたのに、判定用の ref を配線し忘れる | `isDrawingRef?.current` が `undefined` で常に falsy になり、**機構がまるごと死ぬ**。コードは存在するので読んでも気づけない | 配線したら必ず動作で確認する（描画中にウィンドウをリサイズしてみる） |
+| 16 | 進行度の判定を全ガイドパスに同時に流す | 図形が重なるステージで、なぞっていないパスが勝手に進む。Stage 4-3 は顔をなぞるだけで耳が 60% 進む | 第6.5節 `pickPath` で1つ選ぶ |
 
 ---
 
@@ -1308,7 +1398,9 @@ iPad の Safari と Android の Chrome でこの URL を開き、「ホーム画
 1. **PC ブラウザ・iPad Safari・Android Chrome の3環境すべて**で全画面表示され、
    マウス／指のどちらでも点線をなめらかになぞれる
 2. 始点から順になぞると進行度が上がり、70% を超えた時点で完成演出（塗り or モチーフ、音、紙吹雪）が発火する
-3. **画面をランダムに塗りつぶしてもクリアできない**（第6.4節の設計目標）
+3. **画面をランダムに塗りつぶしてもクリアできない。** 直線ステージ（1-1 / 1-2 / 2-3 の光線）と
+   閉じた図形ステージ（2-1 以降）の**両方**で確認すること。直線は順序チェックが効かないため、
+   on-path 率のゲート（第6.3.1節）が実装されていないと通過してしまう
 4. 指を離しても進行度がリセットされない。逆走しても進行度が減らない
 5. 2本目の指や手のひらが触れても、最初の指の軌跡が乱れない
 6. Stage 1-1 から Stage 4-3 まで全12ステージが順次プレイでき、クリアで次が開放される
@@ -1345,6 +1437,8 @@ iPad の Safari と Android の Chrome でこの URL を開き、「ホーム画
 | 項目 | 推奨 |
 |---|---|
 | `LOOKAHEAD` の具体値 | 3 で実装し、実機で緩すぎ／厳しすぎなら 2〜5 で調整 |
+| `ON_PATH_THRESHOLD` の具体値 | 0.5。塗りつぶしの実測最大 30.3%、雑ななぞりの実測最小 66.7% の中間（第6.3.1節）。実機で子どもがクリアできない場合は 0.4 まで下げてよい。0.35 を下回ると塗りつぶしが通り始める |
+| `ON_PATH_ALPHA` の具体値 | 0.02（半減期およそ34点）。大きくすると直近の動きに敏感になり、小さくすると回復が遅くなる |
 | モチーフ図形（雨粒・車・キャンディ等）の具体的な形 | Canvas の基本図形の組み合わせで、それと分かる最小限の形 |
 | Tailwind のカラーパレット詳細 | 各ステージの `themeColor` と調和する範囲で自由 |
 | お手本アニメーションのループ間隔 | 3秒移動 + 1秒静止 で実装し、実機で調整 |
